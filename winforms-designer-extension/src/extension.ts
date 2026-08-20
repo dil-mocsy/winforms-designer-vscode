@@ -1,250 +1,295 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as child_process from 'child_process';
-import * as fs from 'fs';
-import { stripWineNoise } from './wine';
+import {
+    HostDeps,
+    Launcher,
+    STDERR_CAP_BYTES,
+    appendCapped,
+    buildLauncher,
+    describeError,
+    nodeHostDeps,
+    stripWineNoise
+} from './wine';
+
+// Re-exported so tests can reach the host-dependent logic through either module.
+export {
+    HostDeps,
+    Launcher,
+    LauncherOutcome,
+    buildLauncher,
+    findOnPath,
+    getStringSetting,
+    resolveWine,
+    stripWineNoise,
+    toWinePath,
+    wineCandidates,
+    wineEnv
+} from './wine';
 
 const CONFIG_SECTION = 'winformsDesigner';
+const OUTPUT_CHANNEL_HINT = 'See the "WinForms Designer" output channel for details.';
 
-/** How the designer gets started on this platform. */
-interface Launcher {
-    cmd: string;
-    args: string[];
-    env: NodeJS.ProcessEnv;
-    /** True when we go through Wine, i.e. everywhere except Windows. */
-    usesWine: boolean;
+let outputChannel: vscode.OutputChannel | undefined;
+
+/**
+ * One designer per file: the second click must not start a second writer. The
+ * slot is reserved *before* the first `await` (value `undefined` while the launch
+ * is still being prepared), because preparation is asynchronous and the UI stays
+ * responsive throughout — so a second invocation can arrive at any point.
+ */
+const activeLaunches = new Map<string, child_process.ChildProcess | undefined>();
+
+/** Only release the slot we still own; a later launch must keep its own entry. */
+function releaseLaunch(filePath: string, child?: child_process.ChildProcess): void {
+    if (activeLaunches.get(filePath) === child) {
+        activeLaunches.delete(filePath);
+    }
 }
 
-const isWindows = process.platform === 'win32';
-
-/** Wine locations we check when 'winformsDesigner.winePath' is not set. */
-function wineCandidates(): string[] {
-    const home = process.env.HOME ?? '';
-    if (process.platform === 'darwin') {
-        return [
-            '/opt/homebrew/bin/wine',
-            '/usr/local/bin/wine',
-            '/Applications/Wine Stable.app/Contents/Resources/wine/bin/wine',
-            '/Applications/Wine Staging.app/Contents/Resources/wine/bin/wine',
-            '/Applications/Wine Devel.app/Contents/Resources/wine/bin/wine',
-            '/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/wine',
-            path.join(home, 'Library/Application Support/com.isaacmarovitz.Whisky/Libraries/Wine/bin/wine')
-        ];
-    }
-    return [
-        '/usr/bin/wine',
-        '/usr/local/bin/wine',
-        '/opt/wine-stable/bin/wine',
-        '/opt/wine-staging/bin/wine'
-    ];
+/** Everything diagnostic goes to the output channel, never to `console`. */
+function log(message: string): void {
+    outputChannel?.appendLine(`[${new Date().toISOString()}] ${message}`);
 }
 
-/** Look up a bare executable name on PATH, without shelling out. */
-function findOnPath(name: string): string | undefined {
-    const dirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
-    for (const dir of dirs) {
-        const candidate = path.join(dir, name);
-        try {
-            if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
-                return candidate;
-            }
-        } catch {
-            // unreadable PATH entry, keep looking
-        }
-    }
-    return undefined;
+/** Raw child output, kept verbatim so the actionable Wine lines survive. */
+function logRaw(message: string): void {
+    outputChannel?.append(message);
 }
 
-function resolveWine(): string | undefined {
-    const configured = vscode.workspace
-        .getConfiguration(CONFIG_SECTION)
-        .get<string>('winePath', '')
-        .trim();
+/** The real host, with configuration reads wired to the workspace settings. */
+const hostDeps: HostDeps = {
+    ...nodeHostDeps,
+    getSetting: (key: string) => vscode.workspace.getConfiguration(CONFIG_SECTION).get(key),
+    log
+};
 
-    if (configured) {
-        // An explicit setting is authoritative: if it is wrong, say so rather than
-        // silently falling back to some other Wine.
-        if (configured.includes(path.sep) || configured.includes('/')) {
-            return fs.existsSync(configured) ? configured : undefined;
-        }
-        return findOnPath(configured);
-    }
+/** Windows and macOS resolve paths case-insensitively; Linux does not. */
+const CASE_INSENSITIVE_FS = process.platform === 'win32' || process.platform === 'darwin';
 
-    for (const name of ['wine64', 'wine']) {
-        const found = findOnPath(name);
-        if (found) {
-            return found;
-        }
-    }
-    return wineCandidates().find(candidate => fs.existsSync(candidate));
-}
-
-function wineEnv(): NodeJS.ProcessEnv {
-    const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
-    const env: NodeJS.ProcessEnv = { ...process.env };
-
-    const prefix = config.get<string>('winePrefix', '').trim();
-    if (prefix) {
-        env.WINEPREFIX = prefix;
-    }
-    // Wine is extremely chatty on stderr; keep it quiet unless asked otherwise.
-    const debug = config.get<string>('wineDebug', '-all').trim();
-    if (debug) {
-        env.WINEDEBUG = debug;
-    }
-    return env;
+function samePath(a: string, b: string): boolean {
+    return CASE_INSENSITIVE_FS ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
 /**
- * Translate a host path into one the designer will see from inside Wine.
- * Prefers `winepath -w`; falls back to the default Z: drive mapping, which is
- * what Wine maps to '/' in a stock prefix.
+ * The designer rewrites `*.Designer.cs`, so an unsaved buffer for either half of
+ * the pair is a data-loss path in both directions. The suffix test is
+ * case-insensitive: `Form1.designer.cs` is the same file to Windows and macOS,
+ * and missing it would skip the dirty check entirely.
  */
-function toWinePath(wine: string, hostPath: string, env: NodeJS.ProcessEnv): string {
+function relatedFiles(filePath: string): string[] {
+    const designerSuffix = /\.designer\.cs$/i;
+    if (designerSuffix.test(filePath)) {
+        return [filePath, filePath.replace(designerSuffix, '.cs')];
+    }
+    return [filePath, filePath.replace(/\.cs$/i, '.Designer.cs')];
+}
+
+/**
+ * Both halves of a pair drive the same generated file, so they must share one
+ * launch slot - otherwise opening `Form1.cs` and `Form1.Designer.cs` yields two
+ * designers writing one `.Designer.cs`, which is the race P1-9 exists to prevent.
+ */
+function launchKey(filePath: string): string {
+    const designerPath = relatedFiles(filePath).find(candidate => /\.designer\.cs$/i.test(candidate))
+        ?? filePath;
+    return CASE_INSENSITIVE_FS ? designerPath.toLowerCase() : designerPath;
+}
+
+/**
+ * The designer reads from disk. If we hand it a path with unsaved edits it works
+ * from stale content, and the editor's buffer then clobbers whatever it wrote.
+ */
+async function ensureSavedBeforeLaunch(filePath: string): Promise<boolean> {
+    const related = relatedFiles(filePath);
+    const dirty = vscode.workspace.textDocuments.filter(
+        document => related.some(candidate => samePath(candidate, document.uri.fsPath)) && document.isDirty
+    );
+    if (dirty.length === 0) {
+        return true;
+    }
+
+    const names = dirty.map(document => path.basename(document.uri.fsPath)).join(', ');
+    const choice = await vscode.window.showWarningMessage(
+        `${names} ${dirty.length === 1 ? 'has' : 'have'} unsaved changes. The designer reads the file ` +
+        'from disk, so it would ignore those edits and later overwrite them.',
+        { modal: true },
+        'Save and open'
+    );
+    if (choice !== 'Save and open') {
+        log(`Launch cancelled: unsaved changes in ${names}.`);
+        return false;
+    }
+
+    for (const document of dirty) {
+        if (!(await document.save())) {
+            vscode.window.showErrorMessage(
+                `Could not save ${path.basename(document.uri.fsPath)}, so the designer was not started.`
+            );
+            return false;
+        }
+    }
+    return true;
+}
+
+function launchDesigner(launcher: Launcher, filePath: string, key: string): void {
+    const name = path.basename(filePath);
+    log(`Launching ${launcher.cmd} ${launcher.args.join(' ')}`);
+
+    let child: child_process.ChildProcess;
     try {
-        const result = child_process.execFileSync(wine, ['winepath', '-w', hostPath], {
-            env,
-            encoding: 'utf8',
-            // A cold prefix has to be created first, which is slow.
-            timeout: 120_000,
-            stdio: ['ignore', 'pipe', 'pipe']
+        child = child_process.spawn(launcher.cmd, launcher.args, {
+            detached: false,
+            // stdout is deliberately not piped: an unread pipe deadlocks the child
+            // once it fills, and the designer has nothing useful to say there.
+            stdio: ['ignore', 'ignore', 'pipe'],
+            env: launcher.env
         });
-        const converted = result.trim();
-        if (converted) {
-            return converted;
-        }
     } catch (error) {
-        console.warn('winepath failed, falling back to Z: mapping:', error);
+        log(`Spawn failed: ${describeError(error)}`);
+        vscode.window.showErrorMessage(`Could not start the designer: ${describeError(error)}`);
+        return;
     }
-    return 'Z:' + hostPath.replace(/\//g, '\\');
+
+    // Replaces the reservation made by `openDesigner` before it started awaiting.
+    activeLaunches.set(key, child);
+
+    let errorOutput = '';
+    child.stderr?.setEncoding('utf8');
+    child.stderr?.on('data', (chunk: string) => {
+        logRaw(chunk);
+        errorOutput = appendCapped(errorOutput, chunk, STDERR_CAP_BYTES);
+    });
+
+    child.on('error', (error) => {
+        releaseLaunch(key, child);
+        log(`Designer launch error for ${name}: ${describeError(error)}`);
+        vscode.window.showErrorMessage(`Failed to launch designer: ${error.message} ${OUTPUT_CHANNEL_HINT}`);
+    });
+
+    child.on('exit', (code, signal) => {
+        releaseLaunch(key, child);
+        log(`Designer for ${name} exited (code=${code}, signal=${signal}).`);
+
+        const reported = launcher.usesWine ? stripWineNoise(errorOutput) : errorOutput.trim();
+        const detail = reported ? `Error: ${reported}` : OUTPUT_CHANNEL_HINT;
+
+        if (signal) {
+            // Wine crashes arrive as SIGSEGV/SIGABRT with a null exit code.
+            vscode.window.showErrorMessage(
+                `The designer was terminated by ${signal}` +
+                `${launcher.usesWine ? ' - normally a Wine crash' : ''}. ${detail}`
+            );
+        } else if (code === null) {
+            vscode.window.showErrorMessage(`The designer stopped without reporting an exit code. ${detail}`);
+        } else if (code !== 0) {
+            vscode.window.showErrorMessage(`Designer exited with code ${code}. ${detail}`);
+        }
+    });
+
+    // Give it a moment to start, then detach
+    setTimeout(() => {
+        if (!child.killed) {
+            child.unref();
+        }
+    }, 1000);
 }
 
-function installHint(): string {
-    switch (process.platform) {
-        case 'darwin':
-            return 'Install Wine (for example `brew install --cask --no-quarantine wine-stable`, or CrossOver) ' +
-                'or set `winformsDesigner.winePath`.';
-        case 'linux':
-            return 'Install Wine (for example `sudo apt install wine64` or your distro equivalent) ' +
-                'or set `winformsDesigner.winePath`.';
-        default:
-            return 'Set `winformsDesigner.winePath` to your Wine binary.';
+async function openDesigner(extensionPath: string, uri: vscode.Uri | undefined): Promise<void> {
+    if (!uri && vscode.window.activeTextEditor) {
+        uri = vscode.window.activeTextEditor.document.uri;
+    }
+
+    if (!uri) {
+        vscode.window.showErrorMessage('No file selected to open in Designer.');
+        return;
+    }
+
+    const filePath = uri.fsPath;
+    const name = path.basename(filePath);
+
+    if (!/\.cs$/i.test(filePath)) {
+        vscode.window.showErrorMessage('Please select a C# (.cs) file.');
+        return;
+    }
+
+    // Keyed on the generated file, so the two halves of a pair share one slot.
+    const key = launchKey(filePath);
+
+    if (activeLaunches.has(key)) {
+        vscode.window.showInformationMessage(`The designer is already open for ${name}.`);
+        return;
+    }
+
+    // Claim the slot synchronously: everything below awaits, and the progress
+    // notification is non-modal, so the command can be invoked again meanwhile.
+    activeLaunches.set(key, undefined);
+    try {
+        await prepareAndLaunch(extensionPath, filePath, name, key);
+    } finally {
+        // A no-op once `launchDesigner` has stored the child; the child's own
+        // handlers own the entry from that point on.
+        releaseLaunch(key);
     }
 }
 
-function buildLauncher(extensionPath: string, filePath: string): Launcher | undefined {
-    const designerExe = path.join(extensionPath, 'bin', 'SWD4CS.exe');
-    const designerDll = path.join(extensionPath, 'bin', 'SWD4CS.dll');
+async function prepareAndLaunch(extensionPath: string, filePath: string, name: string, key: string): Promise<void> {
+    if (!(await ensureSavedBeforeLaunch(filePath))) {
+        return;
+    }
 
-    if (isWindows) {
-        if (fs.existsSync(designerExe)) {
-            return { cmd: designerExe, args: [filePath], env: { ...process.env }, usesWine: false };
+    await vscode.window.withProgress(
+        {
+            location: vscode.ProgressLocation.Notification,
+            title: `Opening the WinForms Designer for ${name}...`,
+            cancellable: true
+        },
+        async (_progress, token) => {
+            // A cold Wine prefix has to be created before `winepath` answers, which
+            // is slow enough that Cancel has to actually abort the child process.
+            const controller = new AbortController();
+            const cancellation = token.onCancellationRequested(() => controller.abort());
+            try {
+                const outcome = await buildLauncher(extensionPath, filePath, controller.signal, hostDeps);
+                if (token.isCancellationRequested) {
+                    log(`Launch for ${name} cancelled by the user.`);
+                    return;
+                }
+                if (!outcome.ok) {
+                    log(`Refusing to launch for ${name}: ${outcome.error}`);
+                    vscode.window.showErrorMessage(outcome.error);
+                    return;
+                }
+                launchDesigner(outcome.launcher, filePath, key);
+            } catch (error) {
+                if (token.isCancellationRequested) {
+                    log(`Launch for ${name} cancelled by the user.`);
+                    return;
+                }
+                log(`Could not prepare the launch for ${name}: ${describeError(error)}`);
+                vscode.window.showErrorMessage(
+                    `Could not prepare the designer launch: ${describeError(error)} ${OUTPUT_CHANNEL_HINT}`
+                );
+            } finally {
+                cancellation.dispose();
+            }
         }
-        if (fs.existsSync(designerDll)) {
-            return { cmd: 'dotnet', args: [designerDll, filePath], env: { ...process.env }, usesWine: false };
-        }
-        vscode.window.showErrorMessage(`Designer executable not found at: ${designerExe}`);
-        return undefined;
-    }
-
-    // macOS / Linux: the designer is a Windows binary, so it runs through Wine.
-    // The `dotnet SWD4CS.dll` path is deliberately not offered here - that dll
-    // targets a Windows TFM and the host dotnet cannot load it.
-    if (!fs.existsSync(designerExe)) {
-        vscode.window.showErrorMessage(
-            `Designer executable not found at: ${designerExe}. On ${process.platform} it must be a ` +
-            'self-contained Windows build: `dotnet publish -c Release -r win-x64 --self-contained true`.'
-        );
-        return undefined;
-    }
-
-    const wine = resolveWine();
-    if (!wine) {
-        vscode.window.showErrorMessage(`Wine was not found, so the designer cannot be started. ${installHint()}`);
-        return undefined;
-    }
-
-    const env = wineEnv();
-    return {
-        cmd: wine,
-        args: [designerExe, toWinePath(wine, filePath, env)],
-        env,
-        usesWine: true
-    };
+    );
 }
 
 export function activate(context: vscode.ExtensionContext) {
-    console.log('WinForms Designer extension is now active!');
+    outputChannel = vscode.window.createOutputChannel('WinForms Designer');
+    context.subscriptions.push(outputChannel);
+    log('WinForms Designer extension activated.');
 
-    let disposable = vscode.commands.registerCommand('winforms.openDesigner', (uri: vscode.Uri) => {
-        if (!uri && vscode.window.activeTextEditor) {
-            uri = vscode.window.activeTextEditor.document.uri;
-        }
-
-        if (!uri) {
-            vscode.window.showErrorMessage('No file selected to open in Designer.');
-            return;
-        }
-
-        const filePath = uri.fsPath;
-
-        // Check if it's a .cs file
-        if (!filePath.endsWith('.cs')) {
-            vscode.window.showErrorMessage('Please select a C# (.cs) file.');
-            return;
-        }
-
-        const launcher = buildLauncher(context.extensionPath, filePath);
-        if (!launcher) {
-            return;
-        }
-
-        vscode.window.showInformationMessage(
-            `Opening Designer for: ${path.basename(filePath)}${launcher.usesWine ? ' (via Wine)' : ''}...`
-        );
-
-        try {
-            const child = child_process.spawn(launcher.cmd, launcher.args, {
-                detached: false,
-                stdio: ['ignore', 'pipe', 'pipe'],
-                env: launcher.env
-            });
-
-            let errorOutput = '';
-
-            child.stderr?.on('data', (data) => {
-                errorOutput += data.toString();
-            });
-
-            child.on('error', (error) => {
-                vscode.window.showErrorMessage(`Failed to launch designer: ${error.message}`);
-                console.error('Designer launch error:', error);
-            });
-
-            child.on('exit', (code) => {
-                if (code !== 0 && code !== null) {
-                    const reported = launcher.usesWine ? stripWineNoise(errorOutput) : errorOutput;
-                    vscode.window.showErrorMessage(
-                        `Designer exited with code ${code}. ${reported ? 'Error: ' + reported : ''}`
-                    );
-                    console.error('Designer error output:', errorOutput);
-                }
-            });
-
-            // Give it a moment to start, then detach
-            setTimeout(() => {
-                if (!child.killed) {
-                    child.unref();
-                }
-            }, 1000);
-
-        } catch (error) {
-            vscode.window.showErrorMessage(`Error spawning designer: ${error}`);
-            console.error('Spawn error:', error);
-        }
-    });
+    const disposable = vscode.commands.registerCommand(
+        'winforms.openDesigner',
+        (uri?: vscode.Uri) => openDesigner(context.extensionPath, uri)
+    );
 
     context.subscriptions.push(disposable);
 }
 
-export function deactivate() { }
+export function deactivate() {
+    outputChannel = undefined;
+}

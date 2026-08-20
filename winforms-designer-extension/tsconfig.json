@@ -12,7 +12,11 @@
         ],
         "sourceMap": true,
         "rootDir": "src",
-        "strict": true
+        "strict": true,
+        "noUnusedLocals": true,
+        "noUnusedParameters": true,
+        "noImplicitReturns": true,
+        "noUncheckedIndexedAccess": true
     },
     "exclude": [
         "node_modules",

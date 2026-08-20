@@ -36,6 +36,10 @@ yarn-error.log
 *.nupkg
 *.snupkg
 
+# Compiled test output — tests are authored in TypeScript and run from out-test/
+**/tests/**/*.js
+**/tests/**/*.js.map
+
 # OS generated files
 .DS_Store
 Thumbs.db

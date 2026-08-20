@@ -35,7 +35,8 @@ git clone https://github.com/YOUR_USERNAME/winforms-designer-vscode.git
 cd winforms-designer-vscode
 
 # Build the Windows designer and copy it into the extension's bin/ directory.
-# A self-contained publish is required when running through Wine.
+# A self-contained win-x64 publish is the only supported way to populate bin/ —
+# a plain `dotnet build` deliberately copies nothing there.
 dotnet publish SWD4CS/SWD4CS.csproj -c Release -r win-x64 --self-contained true
 
 # Install extension dependencies and compile the VS Code extension
@@ -44,8 +45,14 @@ npm install
 npm run compile
 
 # Package the extension (optional)
-npx vsce package
+npm run package
 ```
+
+> The packaged `.vsix` is around 48 MB, because it embeds the self-contained .NET runtime so
+> nothing has to be installed inside the Wine prefix. Use `npm run package` rather than a
+> global `vsce`: the deprecated unscoped `vsce` package predates VS Code 1.74 and rejects this
+> manifest for a missing `activationEvents`, which modern VS Code infers from
+> `contributes.commands`.
 
 ## 🚀 Usage
 
@@ -94,8 +101,10 @@ prefix — which is the most fragile step otherwise. This works from macOS and L
 dotnet publish SWD4CS/SWD4CS.csproj -c Release -r win-x64 --self-contained true
 ```
 
-Run that command from the repository root. The project copies the published output into
-`winforms-designer-extension/bin/` automatically. Then compile the extension:
+Run that command from the repository root. The project clears
+`winforms-designer-extension/bin/` and copies the published output into it automatically. A
+publish with any other flags fails with an error naming the required command, rather than
+leaving a half-populated `bin/`. Then compile the extension:
 
 ```bash
 cd winforms-designer-extension
@@ -141,6 +150,17 @@ winforms-designer-extension/
 └── tsconfig.json         # TypeScript configuration
 ```
 
+### Rebuilding the designer
+
+`winforms-designer-extension/bin/` has exactly one writer: the publish target. A plain
+`dotnet build` does **not** copy its output there, because doing so used to overwrite the
+self-contained payload with a framework-dependent one and break the launch. Use a publish for
+the inner loop too:
+
+```bash
+dotnet publish SWD4CS/SWD4CS.csproj -c Debug -r win-x64 --self-contained true
+```
+
 ### Running in Development Mode
 
 1. Open the repository root in VS Code
@@ -150,9 +170,13 @@ winforms-designer-extension/
 ### Building the VSIX Package
 
 ```bash
-npm install -g @vscode/vsce
-vsce package
+cd winforms-designer-extension
+npm run package
 ```
+
+`@vscode/vsce` is pinned as a devDependency, so this needs no global install. `vscode:prepublish`
+recompiles first. Populate `bin/` with the self-contained publish before packaging, or the
+`.vsix` will ship without a designer.
 
 ## 🙏 Credits
 

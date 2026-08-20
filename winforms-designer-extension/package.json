@@ -2,7 +2,7 @@
   "name": "winforms-designer-modern",
   "displayName": "Modern WinForms Designer",
   "description": "A visual Windows Forms designer for VS Code, inspired by Visual Studio 2026.",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "engines": {
     "vscode": "^1.80.0"
   },
@@ -13,9 +13,9 @@
     "type": "git",
     "url": "https://github.com/ToTt0G/winforms-designer-vscode.git"
   },
-  "publisher": "ToTt0G",
+  "publisher": "amocsary",
   "author": {
-    "name": "ToTt0G"
+    "name": "amocsary"
   },
   "license": "MIT",
   "main": "./out/extension.js",
@@ -66,13 +66,20 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-      "compile:test": "tsc -p ./tsconfig.test.json",
-      "test": "npm run compile:test && node --test out-test/tests/wine.test.js",
+    "compile:test": "tsc -p ./tsconfig.test.json",
+    "test": "npm run compile:test && node --test out-test/tests/wine.test.js",
+    "typecheck": "tsc -p ./tsconfig.all.json",
+    "lint": "eslint src tests",
+    "package": "vsce package",
     "watch": "tsc -watch -p ./"
   },
   "devDependencies": {
-    "@types/vscode": "^1.134.0",
+    "@eslint/js": "^10.0.1",
+    "@vscode/vsce": "^3.9.2",
     "@types/node": "^26.x",
-    "typescript": "^7.0.2"
+    "@types/vscode": "~1.80.0",
+    "eslint": "^10.8.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.67.0"
   }
 }
