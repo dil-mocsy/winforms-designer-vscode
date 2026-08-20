@@ -2,15 +2,37 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net6.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
 
-  <Target Name="PostBuild" AfterTargets="PostBuildEvent">
-    <Exec Command="xcopy /Y /S /I &quot;$(TargetDir)*.*&quot; &quot;$(ProjectDir)..\winforms-designer-extension\bin&quot;" />
+  <PropertyGroup>
+    <ExtensionBinDir>$(ProjectDir)..\winforms-designer-extension\bin</ExtensionBinDir>
+  </PropertyGroup>
+
+  <!-- Replaces an `xcopy` Exec, which made the build Windows-only. MSBuild's Copy
+       task does the same job on macOS and Linux. -->
+  <Target Name="CopyDesignerToExtension" AfterTargets="Build">
+    <ItemGroup>
+      <BuiltDesignerFiles Include="$(TargetDir)**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(BuiltDesignerFiles)"
+          DestinationFiles="@(BuiltDesignerFiles->'$(ExtensionBinDir)\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- macOS/Linux use a self-contained publish, so mirror that output too. -->
+  <Target Name="CopyPublishedDesignerToExtension" AfterTargets="Publish">
+    <ItemGroup>
+      <PublishedDesignerFiles Include="$(PublishDir)**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(PublishedDesignerFiles)"
+          DestinationFiles="@(PublishedDesignerFiles->'$(ExtensionBinDir)\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
   </Target>
 
 </Project>
