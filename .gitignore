@@ -7,6 +7,8 @@ dist/
 out/
 out-test/
 build/
+[Aa]rtifacts/
+TestResults/
 
 # Visual Studio / VS Code
 .vscode/
@@ -28,6 +30,11 @@ yarn-error.log
 *.cache
 *.deps.json
 *.runtimeconfig.json
+
+# Extension and package artifacts
+*.vsix
+*.nupkg
+*.snupkg
 
 # OS generated files
 .DS_Store

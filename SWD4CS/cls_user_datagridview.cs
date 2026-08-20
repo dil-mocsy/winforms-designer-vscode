@@ -97,13 +97,13 @@ namespace SWD4CS
                 if (this.cls_ctrl.nonCtrl!.GetType() != typeof(Component)) { mode = true; }
             }
 
-            string? eventName = this.Rows[e.RowIndex].Cells[0].Value.ToString();
+            string? eventName = this.Rows[e.RowIndex].Cells[0].Value?.ToString();
             string? newHandler;
             string funcParam = "";
             string param = "";
             string? funcName = ctrl!.Name + "_" + eventName;
 
-            if (this.Rows[e.RowIndex].Cells[1].Value.ToString() == "")
+            if (string.IsNullOrEmpty(this.Rows[e.RowIndex].Cells[1].Value?.ToString()))
             {
                 this.Rows[e.RowIndex].Cells[1].Value = funcName;
                 Type? delegateType;

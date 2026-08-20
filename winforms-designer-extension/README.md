@@ -34,10 +34,13 @@ A powerful Windows Forms visual designer extension for Visual Studio Code. Desig
 git clone https://github.com/YOUR_USERNAME/winforms-designer-vscode.git
 cd winforms-designer-vscode
 
-# Install dependencies
-npm install
+# Build the Windows designer and copy it into the extension's bin/ directory.
+# A self-contained publish is required when running through Wine.
+dotnet publish SWD4CS/SWD4CS.csproj -c Release -r win-x64 --self-contained true
 
-# Compile the extension
+# Install extension dependencies and compile the VS Code extension
+cd winforms-designer-extension
+npm install
 npm run compile
 
 # Package the extension (optional)
@@ -88,11 +91,17 @@ A self-contained build bundles the .NET runtime, so nothing has to be installed 
 prefix — which is the most fragile step otherwise. This works from macOS and Linux:
 
 ```bash
-cd SWD4CS
-dotnet publish -c Release -r win-x64 --self-contained true
+dotnet publish SWD4CS/SWD4CS.csproj -c Release -r win-x64 --self-contained true
 ```
 
-The build copies its output into `winforms-designer-extension/bin/` automatically.
+Run that command from the repository root. The project copies the published output into
+`winforms-designer-extension/bin/` automatically. Then compile the extension:
+
+```bash
+cd winforms-designer-extension
+npm install
+npm run compile
+```
 
 **3. Open a form.** Right-click any `.cs` file → **Open WinForms Designer**. The notification
 reads "(via Wine)" when the Wine path is being used.
@@ -134,7 +143,7 @@ winforms-designer-extension/
 
 ### Running in Development Mode
 
-1. Open the project folder in VS Code
+1. Open the repository root in VS Code
 2. Press **F5** to launch the Extension Development Host
 3. Test the extension in the new window
 

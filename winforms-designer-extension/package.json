@@ -66,6 +66,8 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
+      "compile:test": "tsc -p ./tsconfig.test.json",
+      "test": "npm run compile:test && node --test out-test/tests/wine.test.js",
     "watch": "tsc -watch -p ./"
   },
   "devDependencies": {

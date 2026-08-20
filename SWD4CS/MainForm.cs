@@ -156,18 +156,21 @@ public partial class MainForm : Form
                 }
                 else
                 {
+                    var parent = formCtrl.ctrl!.Parent;
+                    if (parent == null) { continue; }
+
                     foreach (var node in itemNode)
                     {
                         cls_treenode? retNode;
-                        if (formCtrl.ctrl.Parent.Name.IndexOf(".Panel1") > -1)
+                        if (parent.Name.IndexOf(".Panel1") > -1)
                         {
-                            retNode = node.Search(formCtrl.ctrl.Parent.Parent.Name + ".Panel1");
+                            retNode = node.Search(parent.Parent!.Name + ".Panel1");
                         }
-                        else if (formCtrl.ctrl.Parent.Name.IndexOf(".Panel2") > -1)
+                        else if (parent.Name.IndexOf(".Panel2") > -1)
                         {
-                            retNode = node.Search(formCtrl.ctrl.Parent.Parent.Name + ".Panel2");
+                            retNode = node.Search(parent.Parent!.Name + ".Panel2");
                         }
-                        else { retNode = node.Search(formCtrl.ctrl.Parent.Name); }
+                        else { retNode = node.Search(parent.Name); }
 
                         if (retNode != null) { retNode.Add(formCtrl.ctrl.Name, formCtrl.className!); break; }
                     }
@@ -177,7 +180,7 @@ public partial class MainForm : Form
 
         if (itemNode.Count > 0) { NodeRoot.Nodes.AddRange(itemNode.ToArray()); }
         ctrlTreeView.Nodes.Add(NodeRoot);
-        ctrlTreeView.TopNode.Expand();
+        ctrlTreeView.TopNode!.Expand();
     }
 
     private void change_EventsName(string oldName, int index)

@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as child_process from 'child_process';
 import * as fs from 'fs';
+import { stripWineNoise } from './wine';
 
 const CONFIG_SECTION = 'winformsDesigner';
 
@@ -116,15 +117,6 @@ function toWinePath(wine: string, hostPath: string, env: NodeJS.ProcessEnv): str
         console.warn('winepath failed, falling back to Z: mapping:', error);
     }
     return 'Z:' + hostPath.replace(/\//g, '\\');
-}
-
-/** Wine writes fixme/err/warn chatter to stderr even on success. */
-function stripWineNoise(output: string): string {
-    return output
-        .split('\n')
-        .filter(line => !/^\s*(fixme|err|warn|trace|wine):/i.test(line))
-        .join('\n')
-        .trim();
 }
 
 function installHint(): string {
