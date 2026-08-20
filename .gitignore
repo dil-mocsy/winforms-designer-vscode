@@ -5,6 +5,7 @@
 [Oo]bj/
 dist/
 out/
+out-test/
 build/
 
 # Visual Studio / VS Code
