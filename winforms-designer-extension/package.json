@@ -70,7 +70,8 @@
     "test": "npm run compile:test && node --test out-test/tests/wine.test.js",
     "typecheck": "tsc -p ./tsconfig.all.json",
     "lint": "eslint src tests",
-    "package": "vsce package",
+    "publish:designer": "dotnet publish ../SWD4CS/SWD4CS.csproj -c Release -r win-x64 --self-contained true",
+    "package": "npm run publish:designer && vsce package",
     "watch": "tsc -watch -p ./"
   },
   "devDependencies": {
